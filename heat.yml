@@ -1,0 +1,89 @@
+# This describes what is deployed by this template.
+description: NFS/PBS head and workers deployed with Heat on Chameleon
+
+# This defines the minimum Heat version required by this template.
+heat_template_version: 2015-10-15
+
+# The resources section defines what OpenStack resources are to be deployed and
+# how they should be configured.
+resources:
+  nfs_server:
+    type: OS::Nova::Server
+    properties:
+      flavor: baremetal
+      image: CC-CentOS7
+      key_name: { get_param: key_name }
+      networks:
+         - network: sharednet1
+      scheduler_hints: { reservation: { get_param: reservation_id } }
+      user_data: |
+        #!/bin/bash
+        yum install -y nfs-utils
+        mkdir -p /exports/example
+        chown -R cc:cc /exports
+        echo '/exports/example 10.140.80.0/22(rw,async) 10.40.0.0/23(rw,async)' >> /etc/exports
+        systemctl enable rpcbind && systemctl start rpcbind
+        systemctl enable nfs-server && systemctl start nfs-server
+
+  nfs_server_floating_ip:
+    type: OS::Nova::FloatingIP
+    properties:
+      pool: ext-net
+
+  nfs_server_ip_association:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: nfs_server_floating_ip }
+      server_id: { get_resource: nfs_server }
+
+  nfs_clients:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: nfs_client_count }
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          flavor: baremetal
+          image: CC-CentOS7
+          key_name: { get_param: key_name }
+          networks:
+             - network: sharednet1
+          scheduler_hints: { reservation: { get_param: reservation_id } }
+          user_data:
+            str_replace:
+              template: |
+                #!/bin/bash
+                yum install -y nfs-utils
+                echo "$nfs_server_ip:/exports/example    /mnt/    nfs" > /etc/fstab
+                mount -a
+              params:
+                $nfs_server_ip: { get_attr: [nfs_server, first_address] }
+
+# The parameters section gathers configuration from the user.
+parameters:
+  nfs_client_count:
+    type: number
+    description: Number of workers
+    default: 1
+    constraints:
+      - range: { min: 1 }
+        description: There must be at least one worker.
+  key_name:
+    type: string
+    description: Name of a KeyPair to enable SSH access to the instance
+    default: default
+    constraints:
+    - custom_constraint: nova.keypair
+  reservation_id:
+    type: string
+    description: ID of the Blazar reservation to use for launching instances.
+    constraints:
+    - custom_constraint: blazar.reservation
+
+outputs:
+  server_ip:
+    description: Public IP address of the Head node
+    value: { get_attr: [nfs_server_floating_ip, ip] }
+  client_ips:
+    description: Private IP addresses of the workers
+    value: { get_attr: [nfs_clients, first_address] }
