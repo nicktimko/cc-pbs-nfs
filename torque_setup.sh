@@ -1,49 +1,45 @@
-Vaguely following along with https://wiki.archlinux.org/index.php/TORQUE
+yum install -y torque torque-server torque-client torque-mom torque-libs
 
-Actually [this one](http://www.idurun.com/2016/02/17/install-torque-resource-manager-on-centos-7/) because it's for CentOS7 and uses the yum packages
+cat >> /etc/hosts <<eof
+10.x.y.z head
+10.x.y.w worker1
+eof
 
-Using the CC-CentOS7 NFS complex-appliance with 1 client node as a base.
+echo 'head' > /var/lib/torque/server_name
+cat >> /etc/hosts <<eof
+10.x.y.z head
+10.x.y.w worker1
+eof
 
-# Server
+# * `/etc/hostname` is used for `/var/spool/torque/server_name` as well as an alias for `10.x.y.z head ...`
 
-1. `yum install -y torque torque-server torque-client torque-mom torque-libs`
-  * `-client` seems to be needed for the `qmgr` commands.
+# 3. Create a key for munge (whatever that is)
+cd /etc/munge
+dd if=/dev/urandom bs=1 count=1024 > munge.key
+chown munge munge.key
+chmod 400 munge.key
 
-2. Manually configure `/etc/hosts` with the head and worker nodes (private IPs)
-  * `/etc/hostname` is used for `/var/spool/torque/server_name` as well as an alias for `10.x.y.z head ...`
+# 4. Run the service
+systemctl enable munge.service
+systemctl start munge.service
+systemctl status munge.service
 
-3. Create a key for munge (whatever that is)
-  ```
-  cd /etc/munge
-  dd if=/dev/urandom bs=1 count=1024 > munge.key
-  chown munge munge.key
-  chmod 400 munge.key
-  ```
+# 5. Set up Torque on head
+# cd /usr/share/doc/torque-4.2.10/
+# vi torque.setup # modify as you see fit, or just leave as defaults for now
+# chmod +x torque.setup
+/bin/sh /usr/share/doc/torque-4.2.10/torque.setup root
 
-4. Run the service
-  ```
-  systemctl enable munge.service
-  systemctl start munge.service
-  systemctl status munge.service
-  ```
+# 6. Set up Torque on workers
+cat > /var/lib/torque/mom_priv/torque.cfg <<eof
+\$pbsserver head
+\$logevent 255
+eof
 
-5. Set up Torque on head
-  ```
-  cd /usr/share/doc/torque-4.2.10/
-  # vi torque.setup # modify as you see fit, or just leave as defaults for now
-  chmod +x torque.setup
-  ./torque.setup root
-  ```
+# 7. Launch `trqauthd` on head (whatever that is):
+echo >/dev/null <<comment
+systemctl start trqauthd.service
 
-6. Set up Torque on workers
-  ```
-  cat > /var/lib/torque/mom_priv/torque.cfg <<eof
-  $pbsserver [hostname-of-head-node]
-  $logevent 255
-  eof
-  ```
-
-7. Launch `trqauthd` on head (whatever that is): `systemctl start trqauthd.service`
   * If it doesn't start, might already be running:
     ```
     [root@test-npt-nfs-2-nfs-server-eyqch4rdf6id etc]# systemctl start trqauthd.service
@@ -120,3 +116,4 @@ iptables -P FORWARD DROP
 iptables -P OUTPUT ACCEPT
 iptables --list --verbose
 ```
+comment

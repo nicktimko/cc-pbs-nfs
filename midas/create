@@ -1,0 +1,2 @@
+#!/bin/sh
+heat stack-create -f hot-midas.yml -e env-test-midas.yml test-npt-midas

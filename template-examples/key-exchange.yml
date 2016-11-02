@@ -1,0 +1,103 @@
+heat_template_version: 2015-10-15
+
+description: >
+  This template demonstrates how to exchange SSH host keys inside a Heat-deployed cluster.
+
+parameters:
+  key_name:
+    type: string
+    default: default
+    constraints:
+    - custom_constraint: nova.keypair
+  flavor:
+    type: string
+    default: baremetal
+    constraints:
+    - custom_constraint: nova.flavor
+  image:
+    type: string
+    default: CC-CentOS7
+    constraints:
+    - custom_constraint: glance.image
+  reservation_id:
+    type: string
+    description: ID of the Blazar reservation to use for launching instances.
+    constraints:
+    - custom_constraint: blazar.reservation
+
+resources:
+  export_ssh_host_key:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      outputs:
+        - name: ssh_host_key
+      group: script
+      config: |
+        #!/bin/sh
+        IP_ADDRESS=$(facter ipaddress)
+        (echo -n ${IP_ADDRESS}; echo -n ' '; cat /etc/ssh/ssh_host_rsa_key.pub) > ${heat_outputs_path}.ssh_host_key
+
+  add_ssh_key:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      inputs:
+        - name: ssh_host_keys
+      group: script
+      config: |
+        #!/usr/bin/env python
+        import ast
+        import os
+        import string
+        import subprocess
+        ssh_host_keys = os.getenv('ssh_host_keys')
+        with open('/root/ssh_host_keys', 'w') as f:
+            f.write(ssh_host_keys)
+        if ssh_host_keys is not None:
+            ssh_host_keys = ast.literal_eval(string.replace(ssh_host_keys, '\n', '\\n'))
+        with open('/etc/ssh/ssh_known_hosts', 'a') as ssh_known_hosts:
+            with open('/etc/ssh/shosts.equiv', 'a') as shosts_equiv:
+              for ssh_host_key in ssh_host_keys.values():
+                  ssh_known_hosts.write(ssh_host_key.rstrip() + '\n')
+                  shosts_equiv.write(ssh_host_key.split(' ')[0] + '\n')
+        with open('/etc/ssh/ssh_config', 'a') as f:
+            f.write('\nHost *\n    EnableSSHKeysign yes\n    HostbasedAuthentication yes\n')
+        with open('/etc/ssh/sshd_config', 'a') as f:
+            f.write('\nHostbasedAuthentication yes\n')
+        subprocess.check_output('systemctl restart sshd', shell=True)
+
+  deploymentgroup_export:
+    type: OS::Heat::SoftwareDeploymentGroup
+    properties:
+      config: { get_resource: export_ssh_host_key }
+      servers: { get_attr: [server_group, refs_map] }
+      signal_transport: HEAT_SIGNAL
+
+  deploymentgroup_add:
+    type: OS::Heat::SoftwareDeploymentGroup
+    depends_on: deploymentgroup_export
+    properties:
+      config: { get_resource: add_ssh_key }
+      servers: { get_attr: [server_group, refs_map] }
+      signal_transport: HEAT_SIGNAL
+      input_values:
+        ssh_host_keys: { get_attr: [ deploymentgroup_export, ssh_host_key ] }
+
+  server_group:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: 2
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          flavor: { get_param: flavor }
+          image: { get_param: image }
+          key_name: { get_param: key_name }
+          networks:
+             - network: sharednet1
+          scheduler_hints: { reservation: { get_param: reservation_id } }
+          user_data_format: SOFTWARE_CONFIG
+          software_config_transport: POLL_SERVER_HEAT
+
+outputs:
+  deployment_results:
+    value: { get_attr: [deploymentgroup_export, ssh_host_key] }

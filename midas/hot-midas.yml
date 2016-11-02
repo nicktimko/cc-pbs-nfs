@@ -1,0 +1,191 @@
+# This describes what is deployed by this template.
+description: NFS/PBS head and workers deployed with Heat on Chameleon
+
+# This defines the minimum Heat version required by this template.
+heat_template_version: 2015-10-15
+
+# The resources section defines what OpenStack resources are to be deployed and
+# how they should be configured.
+resources:
+  midas_client_keypair:
+    type: OS::Nova::KeyPair
+    properties:
+      save_private_key: true
+      name: midas-client
+        # str_replace:
+        #   template: mpi_stack_id
+        #   params:
+        #     stack_id: { get_param: "OS::stack_id" }
+
+  midas_head:
+    type: OS::Nova::Server
+    properties:
+      name: midas-head
+      flavor: baremetal
+      image: CC-CentOS7
+      key_name: { get_param: key_name }
+      networks:
+         - network: sharednet1
+      scheduler_hints: { reservation: { get_param: reservation_id } }
+      user_data:
+        str_replace:
+          params:
+            CLIENT_PUBLIC: { get_attr: [ midas_client_keypair, public_key ] }
+            CLIENT_PRIVATE: { get_attr: [ midas_client_keypair, private_key ] }
+
+          template: |
+            #!/bin/bash
+            yum install -y nfs-utils
+            mkdir -p /exports/example
+            chown -R cc:cc /exports
+            echo '/exports/example 10.140.80.0/22(rw,async) 10.40.0.0/23(rw,async)' >> /etc/exports
+            systemctl enable rpcbind && systemctl start rpcbind
+            systemctl enable nfs-server && systemctl start nfs-server
+
+            # hostname midas-head
+            echo $(facter ipaddress) $(hostname) >> /etc/hosts
+            cp /etc/hosts /exports/example/
+            chown cc:cc /exports/example/hosts
+
+            yum install -y torque torque-server torque-client torque-mom torque-libs
+
+            cd /etc/munge
+            dd if=/dev/urandom bs=1 count=1024 > munge.key
+            chown munge munge.key
+            chmod 400 munge.key
+            systemctl enable munge.service
+            systemctl start munge.service
+
+            /bin/sh /usr/share/doc/torque-4.2.10/torque.setup root
+            echo $(hostname) > /var/lib/torque/server_name
+
+            # cat << EOF >> /home/cc/.ssh/authorized_keys
+            # CLIENT_PUBLIC
+            # EOF
+
+            pushd /home/cc/.ssh/
+            cat << EOF > id_rsa.pub
+            CLIENT_PUBLIC
+            EOF
+            cat id_rsa.pub >> authorized_keys
+
+            cat << EOF > id_rsa
+            CLIENT_PRIVATE
+            EOF
+
+            # bad security :(
+            cat << EOF > config
+            Host *
+              StrictHostKeyChecking no
+            EOF
+
+            chmod 600 id_rsa authorized_keys
+            chmod 644 id_rsa.pub config
+            chown cc:cc *
+            popd
+
+  midas_head_floating_ip:
+    type: OS::Nova::FloatingIP
+    properties:
+      pool: ext-net
+
+  midas_head_ip_association:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: midas_head_floating_ip }
+      server_id: { get_resource: midas_head }
+
+  midas_workers:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: midas_worker_count }
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          name: midas-node-%index%
+          flavor: baremetal
+          image: CC-CentOS7
+          key_name: { get_param: key_name }
+          networks:
+             - network: sharednet1
+          scheduler_hints: { reservation: { get_param: reservation_id } }
+          user_data:
+            str_replace:
+              params:
+                MIDAS_HEAD_IP: { get_attr: [ midas_head, first_address ] }
+                CLIENT_PUBLIC: { get_attr: [ midas_client_keypair, public_key ] }
+                CLIENT_PRIVATE: { get_attr: [ midas_client_keypair, private_key ] }
+
+              template: |
+                #!/bin/bash
+                yum install -y nfs-utils
+                echo "MIDAS_HEAD_IP:/exports/example    /mnt/    nfs" > /etc/fstab
+                mount -a
+
+                yum install -y torque torque-server torque-client torque-mom torque-libs
+
+                echo $(facter ipaddress) $(hostname) >> /mnt/hosts
+                echo MIDAS_HEAD_IP midas-head >> /etc/hosts
+
+                cd /etc/munge
+                dd if=/dev/urandom bs=1 count=1024 > munge.key
+                chown munge munge.key
+                chmod 400 munge.key
+                systemctl enable munge.service
+                systemctl start munge.service
+
+                pushd /home/cc/.ssh/
+                cat << EOF > id_rsa.pub
+                CLIENT_PUBLIC
+                EOF
+                cat id_rsa.pub >> authorized_keys
+
+                cat << EOF > id_rsa
+                CLIENT_PRIVATE
+                EOF
+
+                # bad security :(
+                cat << EOF > config
+                Host *
+                  StrictHostKeyChecking no
+                EOF
+
+                chmod 600 id_rsa authorized_keys
+                chmod 644 id_rsa.pub config
+                chown cc:cc *
+                popd
+
+                cat << EOF > /var/lib/torque/mom_priv/config
+                \$pbsserver midas-head
+                EOF
+
+                pbs_mom
+
+# The parameters section gathers configuration from the user.
+parameters:
+  midas_worker_count:
+    type: number
+    description: Number of workers
+    default: 1
+    constraints:
+      - range: { min: 1 }
+        description: There must be at least one worker.
+  key_name:
+    type: string
+    description: Name of a KeyPair to enable SSH access to the instance
+    default: default
+    constraints:
+    - custom_constraint: nova.keypair
+  reservation_id:
+    type: string
+    description: ID of the Blazar reservation to use for launching instances.
+    constraints:
+    - custom_constraint: blazar.reservation
+
+outputs:
+  server_ip:
+    description: Public IP address of the Head node
+    value: { get_attr: [ midas_head_floating_ip, ip ] }
+  client_ips:
+    description: Private IP addresses of the workers
+    value: { get_attr: [ midas_workers, first_address ] }

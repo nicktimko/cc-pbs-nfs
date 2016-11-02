@@ -1,0 +1,4 @@
+parameters:
+  midas_worker_count: 1
+  key_name: nick-mbp12
+  reservation_id: 5b84a897-3acf-486e-87d6-47a2acd9f5c0
