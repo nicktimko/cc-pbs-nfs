@@ -102,7 +102,7 @@ resources:
       resource_def:
         type: OS::Nova::Server
         properties:
-          name: midas-node-%index%
+          name: midas-worker-%index%
           flavor: baremetal
           image: CC-CentOS7
           key_name: { get_param: key_name }
